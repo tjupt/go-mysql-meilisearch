@@ -10,33 +10,33 @@ import (
 )
 
 var (
-	esInsertNum = promauto.NewCounterVec(
+	meiliInsertNum = promauto.NewCounterVec(
 		prometheus.CounterOpts{
-			Name: "mysql2es_inserted_num",
-			Help: "The number of docs inserted to elasticsearch",
+			Name: "mysql2meili_inserted_num",
+			Help: "The number of docs inserted to meilisearch",
 		}, []string{"index"},
 	)
-	esUpdateNum = promauto.NewCounterVec(
+	meiliUpdateNum = promauto.NewCounterVec(
 		prometheus.CounterOpts{
-			Name: "mysql2es_updated_num",
-			Help: "The number of docs updated to elasticsearch",
+			Name: "mysql2meili_updated_num",
+			Help: "The number of docs updated to meilisearch",
 		}, []string{"index"},
 	)
-	esDeleteNum = promauto.NewCounterVec(
+	meiliDeleteNum = promauto.NewCounterVec(
 		prometheus.CounterOpts{
-			Name: "mysql2es_deleted_num",
-			Help: "The number of docs deleted from elasticsearch",
+			Name: "mysql2meili_deleted_num",
+			Help: "The number of docs deleted from meilisearch",
 		}, []string{"index"},
 	)
 	canalSyncState = promauto.NewGauge(
 		prometheus.GaugeOpts{
-			Name: "mysql2es_canal_state",
+			Name: "mysql2meili_canal_state",
 			Help: "The canal slave running state: 0=stopped, 1=ok",
 		},
 	)
 	canalDelay = promauto.NewGauge(
 		prometheus.GaugeOpts{
-			Name: "mysql2es_canal_delay",
+			Name: "mysql2meili_canal_delay",
 			Help: "The canal slave lag",
 		},
 	)

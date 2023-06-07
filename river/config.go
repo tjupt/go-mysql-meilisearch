@@ -1,7 +1,7 @@
 package river
 
 import (
-	"io/ioutil"
+	"os"
 	"time"
 
 	"github.com/BurntSushi/toml"
@@ -21,10 +21,8 @@ type Config struct {
 	MyPassword string `toml:"my_pass"`
 	MyCharset  string `toml:"my_charset"`
 
-	ESHttps    bool   `toml:"es_https"`
-	ESAddr     string `toml:"es_addr"`
-	ESUser     string `toml:"es_user"`
-	ESPassword string `toml:"es_pass"`
+	MeiliAddr   string `toml:"meili_addr"`
+	MeiliAPIKey string `toml:"meili_api_key"`
 
 	StatAddr string `toml:"stat_addr"`
 	StatPath string `toml:"stat_path"`
@@ -40,16 +38,12 @@ type Config struct {
 
 	Rules []*Rule `toml:"rule"`
 
-	BulkSize int `toml:"bulk_size"`
-
-	FlushBulkTime TomlDuration `toml:"flush_bulk_time"`
-
 	SkipNoPkTable bool `toml:"skip_no_pk_table"`
 }
 
 // NewConfigWithFile creates a Config from file.
 func NewConfigWithFile(name string) (*Config, error) {
-	data, err := ioutil.ReadFile(name)
+	data, err := os.ReadFile(name)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}

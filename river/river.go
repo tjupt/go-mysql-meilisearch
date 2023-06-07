@@ -3,22 +3,22 @@ package river
 import (
 	"context"
 	"fmt"
+	"github.com/meilisearch/meilisearch-go"
 	"regexp"
 	"strings"
 	"sync"
 
+	"github.com/go-mysql-org/go-mysql/canal"
 	"github.com/juju/errors"
 	"github.com/siddontang/go-log/log"
-	"github.com/siddontang/go-mysql-elasticsearch/elastic"
-	"github.com/siddontang/go-mysql/canal"
 )
 
 // ErrRuleNotExist is the error if rule is not defined.
 var ErrRuleNotExist = errors.New("rule is not exist")
 
-// River is a pluggable service within Elasticsearch pulling data then indexing it into Elasticsearch.
-// We use this definition here too, although it may not run within Elasticsearch.
-// Maybe later I can implement a acutal river in Elasticsearch, but I must learn java. :-)
+// River is a pluggable service within meilisearch pulling data then indexing it into meilisearch.
+// We use this definition here too, although it may not run within meilisearch.
+// Maybe later I can implement an actual river in meilisearch, but I must learn java. :-)
 type River struct {
 	c *Config
 
@@ -31,7 +31,7 @@ type River struct {
 
 	wg sync.WaitGroup
 
-	es *elastic.Client
+	client *meilisearch.Client
 
 	master *masterInfo
 
@@ -69,12 +69,7 @@ func NewRiver(c *Config) (*River, error) {
 		return nil, errors.Trace(err)
 	}
 
-	cfg := new(elastic.ClientConfig)
-	cfg.Addr = r.c.ESAddr
-	cfg.User = r.c.ESUser
-	cfg.Password = r.c.ESPassword
-	cfg.HTTPS = r.c.ESHttps
-	r.es = elastic.NewClient(cfg)
+	r.client = meilisearch.NewClient(meilisearch.ClientConfig{Host: r.c.MeiliAddr, APIKey: r.c.MeiliAPIKey})
 
 	go InitStatus(r.c.StatAddr, r.c.StatPath)
 
@@ -179,7 +174,7 @@ func (r *River) parseSource() (map[string][]string, error) {
 					return nil, errors.Errorf("duplicate wildcard table defined for %s.%s", s.Schema, table)
 				}
 
-				tables := []string{}
+				var tables []string
 
 				sql := fmt.Sprintf(`SELECT table_name FROM information_schema.tables WHERE
 					table_name RLIKE "%s" AND table_schema = "%s";`, buildTable(table), s.Schema)
@@ -245,8 +240,6 @@ func (r *River) prepareRule() error {
 				for _, table := range tables {
 					rr := r.rules[ruleKey(rule.Schema, table)]
 					rr.Index = rule.Index
-					rr.Type = rule.Type
-					rr.Parent = rule.Parent
 					rr.ID = rule.ID
 					rr.FieldMapping = rule.FieldMapping
 				}

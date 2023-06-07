@@ -1,9 +1,9 @@
 all: build
 
-build: build-elasticsearch
+build: build-meilisearch
 
-build-elasticsearch:
-	GO111MODULE=on go build -o bin/go-mysql-elasticsearch ./cmd/go-mysql-elasticsearch
+build-meilisearch:
+	GO111MODULE=on go build -o bin/go-mysql-meilisearch ./cmd/go-mysql-meilisearch
 
 test:
 	GO111MODULE=on go test -timeout 1m --race ./...

@@ -8,9 +8,9 @@ import (
 	"time"
 
 	"github.com/BurntSushi/toml"
+	"github.com/go-mysql-org/go-mysql/mysql"
 	"github.com/juju/errors"
 	"github.com/siddontang/go-log/log"
-	"github.com/siddontang/go-mysql/mysql"
 	"github.com/siddontang/go/ioutil2"
 )
 
@@ -46,7 +46,7 @@ func loadMasterInfo(dataDir string) (*masterInfo, error) {
 	}
 	defer f.Close()
 
-	_, err = toml.DecodeReader(f, &m)
+	_, err = toml.NewDecoder(f).Decode(&m)
 	return &m, errors.Trace(err)
 }
 

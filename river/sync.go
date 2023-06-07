@@ -4,22 +4,23 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"github.com/meilisearch/meilisearch-go"
 	"reflect"
 	"strings"
 	"time"
 
+	"github.com/go-mysql-org/go-mysql/canal"
+	"github.com/go-mysql-org/go-mysql/mysql"
+	"github.com/go-mysql-org/go-mysql/replication"
+	"github.com/go-mysql-org/go-mysql/schema"
 	"github.com/juju/errors"
 	"github.com/siddontang/go-log/log"
-	"github.com/siddontang/go-mysql-elasticsearch/elastic"
-	"github.com/siddontang/go-mysql/canal"
-	"github.com/siddontang/go-mysql/mysql"
-	"github.com/siddontang/go-mysql/replication"
-	"github.com/siddontang/go-mysql/schema"
 )
 
 const (
+	// fixme: 检查格式是否符合meilisearch要求
 	fieldTypeList = "list"
-	// for the mysql int type to es date type
+	// for the mysql int type to meili date type
 	// set the [rule.field] created_time = ",date"
 	fieldTypeDate = "date"
 )
@@ -35,10 +36,10 @@ type eventHandler struct {
 	r *River
 }
 
-func (h *eventHandler) OnRotate(e *replication.RotateEvent) error {
+func (h *eventHandler) OnRotate(header *replication.EventHeader, rotateEvent *replication.RotateEvent) error {
 	pos := mysql.Position{
-		Name: string(e.NextLogName),
-		Pos:  uint32(e.Position),
+		Name: string(rotateEvent.NextLogName),
+		Pos:  uint32(rotateEvent.Position),
 	}
 
 	h.r.syncCh <- posSaver{pos, true}
@@ -46,7 +47,7 @@ func (h *eventHandler) OnRotate(e *replication.RotateEvent) error {
 	return h.r.ctx.Err()
 }
 
-func (h *eventHandler) OnTableChanged(schema, table string) error {
+func (h *eventHandler) OnTableChanged(header *replication.EventHeader, schema string, table string) error {
 	err := h.r.updateRule(schema, table)
 	if err != nil && err != ErrRuleNotExist {
 		return errors.Trace(err)
@@ -54,12 +55,12 @@ func (h *eventHandler) OnTableChanged(schema, table string) error {
 	return nil
 }
 
-func (h *eventHandler) OnDDL(nextPos mysql.Position, _ *replication.QueryEvent) error {
+func (h *eventHandler) OnDDL(header *replication.EventHeader, nextPos mysql.Position, queryEvent *replication.QueryEvent) error {
 	h.r.syncCh <- posSaver{nextPos, true}
 	return h.r.ctx.Err()
 }
 
-func (h *eventHandler) OnXID(nextPos mysql.Position) error {
+func (h *eventHandler) OnXID(header *replication.EventHeader, nextPos mysql.Position) error {
 	h.r.syncCh <- posSaver{nextPos, false}
 	return h.r.ctx.Err()
 }
@@ -70,7 +71,7 @@ func (h *eventHandler) OnRow(e *canal.RowsEvent) error {
 		return nil
 	}
 
-	var reqs []*elastic.BulkRequest
+	var reqs []*meilisearch.TaskInfo
 	var err error
 	switch e.Action {
 	case canal.InsertAction:
@@ -93,40 +94,26 @@ func (h *eventHandler) OnRow(e *canal.RowsEvent) error {
 	return h.r.ctx.Err()
 }
 
-func (h *eventHandler) OnGTID(gtid mysql.GTIDSet) error {
+func (h *eventHandler) OnGTID(header *replication.EventHeader, gtid mysql.GTIDSet) error {
 	return nil
 }
 
-func (h *eventHandler) OnPosSynced(pos mysql.Position, set mysql.GTIDSet, force bool) error {
+func (h *eventHandler) OnPosSynced(header *replication.EventHeader, pos mysql.Position, set mysql.GTIDSet, force bool) error {
 	return nil
 }
 
 func (h *eventHandler) String() string {
-	return "ESRiverEventHandler"
+	return "MeiliRiverEventHandler"
 }
 
 func (r *River) syncLoop() {
-	bulkSize := r.c.BulkSize
-	if bulkSize == 0 {
-		bulkSize = 128
-	}
-
-	interval := r.c.FlushBulkTime.Duration
-	if interval == 0 {
-		interval = 200 * time.Millisecond
-	}
-
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
 	defer r.wg.Done()
 
 	lastSavedTime := time.Now()
-	reqs := make([]*elastic.BulkRequest, 0, 1024)
 
 	var pos mysql.Position
 
 	for {
-		needFlush := false
 		needSavePos := false
 
 		select {
@@ -136,28 +123,22 @@ func (r *River) syncLoop() {
 				now := time.Now()
 				if v.force || now.Sub(lastSavedTime) > 3*time.Second {
 					lastSavedTime = now
-					needFlush = true
 					needSavePos = true
 					pos = v.pos
 				}
-			case []*elastic.BulkRequest:
-				reqs = append(reqs, v...)
-				needFlush = len(reqs) >= bulkSize
+			case []*meilisearch.TaskInfo:
+				for _, req := range v {
+					task, err := r.client.WaitForTask(req.TaskUID)
+					if err != nil {
+						// todo: 重试？
+						log.Errorf("meilisearch task failed: %v", err)
+					} else {
+						log.Debugf("meilisearch task success: %v", task.Type)
+					}
+				}
 			}
-		case <-ticker.C:
-			needFlush = true
 		case <-r.ctx.Done():
 			return
-		}
-
-		if needFlush {
-			// TODO: retry some times?
-			if err := r.doBulk(reqs); err != nil {
-				log.Errorf("do ES bulk err %v, close sync", err)
-				r.cancel()
-				return
-			}
-			reqs = reqs[0:0]
 		}
 
 		if needSavePos {
@@ -171,8 +152,8 @@ func (r *River) syncLoop() {
 }
 
 // for insert and delete
-func (r *River) makeRequest(rule *Rule, action string, rows [][]interface{}) ([]*elastic.BulkRequest, error) {
-	reqs := make([]*elastic.BulkRequest, 0, len(rows))
+func (r *River) makeRequest(rule *Rule, action string, rows [][]interface{}) ([]*map[string]interface{}, error) {
+	reqs := make([]*map[string]interface{}, 0, len(rows))
 
 	for _, values := range rows {
 		id, err := r.getDocID(rule, values)
@@ -180,43 +161,55 @@ func (r *River) makeRequest(rule *Rule, action string, rows [][]interface{}) ([]
 			return nil, errors.Trace(err)
 		}
 
-		parentID := ""
-		if len(rule.Parent) > 0 {
-			if parentID, err = r.getParentID(rule, values, rule.Parent); err != nil {
-				return nil, errors.Trace(err)
-			}
-		}
-
-		req := &elastic.BulkRequest{Index: rule.Index, Type: rule.Type, ID: id, Parent: parentID, Pipeline: rule.Pipeline}
+		req := make(map[string]interface{})
+		req["id"] = id
 
 		if action == canal.DeleteAction {
-			req.Action = elastic.ActionDelete
-			esDeleteNum.WithLabelValues(rule.Index).Inc()
+			meiliDeleteNum.WithLabelValues(rule.Index).Inc()
 		} else {
-			r.makeInsertReqData(req, rule, values)
-			esInsertNum.WithLabelValues(rule.Index).Inc()
+			r.makeInsertReqData(&req, rule, values)
+			meiliInsertNum.WithLabelValues(rule.Index).Inc()
 		}
 
-		reqs = append(reqs, req)
+		reqs = append(reqs, &req)
 	}
 
 	return reqs, nil
 }
 
-func (r *River) makeInsertRequest(rule *Rule, rows [][]interface{}) ([]*elastic.BulkRequest, error) {
-	return r.makeRequest(rule, canal.InsertAction, rows)
+func (r *River) makeInsertRequest(rule *Rule, rows [][]interface{}) ([]*meilisearch.TaskInfo, error) {
+	reqs, err := r.makeRequest(rule, canal.InsertAction, rows)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, err := r.client.Index(rule.Index).AddDocuments(reqs, "id")
+
+	return []*meilisearch.TaskInfo{resp}, err
 }
 
-func (r *River) makeDeleteRequest(rule *Rule, rows [][]interface{}) ([]*elastic.BulkRequest, error) {
-	return r.makeRequest(rule, canal.DeleteAction, rows)
+func (r *River) makeDeleteRequest(rule *Rule, rows [][]interface{}) ([]*meilisearch.TaskInfo, error) {
+	ids := make([]string, 0, len(rows))
+
+	for _, values := range rows {
+		id, err := r.getDocID(rule, values)
+		if err != nil {
+			return nil, errors.Trace(err)
+		}
+		ids = append(ids, id)
+	}
+
+	resp, err := r.client.Index(rule.Index).DeleteDocuments(ids)
+
+	return []*meilisearch.TaskInfo{resp}, err
 }
 
-func (r *River) makeUpdateRequest(rule *Rule, rows [][]interface{}) ([]*elastic.BulkRequest, error) {
+func (r *River) makeUpdateRequest(rule *Rule, rows [][]interface{}) ([]*meilisearch.TaskInfo, error) {
 	if len(rows)%2 != 0 {
 		return nil, errors.Errorf("invalid update rows event, must have 2x rows, but %d", len(rows))
 	}
 
-	reqs := make([]*elastic.BulkRequest, 0, len(rows))
+	reqs := make([]*meilisearch.TaskInfo, 0, len(rows))
 
 	for i := 0; i < len(rows); i += 2 {
 		beforeID, err := r.getDocID(rule, rows[i])
@@ -230,41 +223,35 @@ func (r *River) makeUpdateRequest(rule *Rule, rows [][]interface{}) ([]*elastic.
 			return nil, errors.Trace(err)
 		}
 
-		beforeParentID, afterParentID := "", ""
-		if len(rule.Parent) > 0 {
-			if beforeParentID, err = r.getParentID(rule, rows[i], rule.Parent); err != nil {
+		req := make(map[string]interface{})
+		req["id"] = afterID
+
+		if beforeID != afterID {
+			resp, err := r.client.Index(rule.Index).DeleteDocument(beforeID)
+			if err != nil {
 				return nil, errors.Trace(err)
 			}
-			if afterParentID, err = r.getParentID(rule, rows[i+1], rule.Parent); err != nil {
+			reqs = append(reqs, resp)
+
+			r.makeInsertReqData(&req, rule, rows[i+1])
+			resp, err = r.client.Index(rule.Index).AddDocuments([]map[string]interface{}{req}, "id")
+			if err != nil {
 				return nil, errors.Trace(err)
 			}
-		}
+			reqs = append(reqs, resp)
 
-		req := &elastic.BulkRequest{Index: rule.Index, Type: rule.Type, ID: beforeID, Parent: beforeParentID}
-
-		if beforeID != afterID || beforeParentID != afterParentID {
-			req.Action = elastic.ActionDelete
-			reqs = append(reqs, req)
-
-			req = &elastic.BulkRequest{Index: rule.Index, Type: rule.Type, ID: afterID, Parent: afterParentID, Pipeline: rule.Pipeline}
-			r.makeInsertReqData(req, rule, rows[i+1])
-
-			esDeleteNum.WithLabelValues(rule.Index).Inc()
-			esInsertNum.WithLabelValues(rule.Index).Inc()
+			meiliDeleteNum.WithLabelValues(rule.Index).Inc()
+			meiliInsertNum.WithLabelValues(rule.Index).Inc()
 		} else {
-			if len(rule.Pipeline) > 0 {
-				// Pipelines can only be specified on index action
-				r.makeInsertReqData(req, rule, rows[i+1])
-				// Make sure action is index, not create
-				req.Action = elastic.ActionIndex
-				req.Pipeline = rule.Pipeline
-			} else {
-				r.makeUpdateReqData(req, rule, rows[i], rows[i+1])
+			r.makeUpdateReqData(&req, rule, rows[i], rows[i+1])
+			resp, err := r.client.Index(rule.Index).UpdateDocuments([]map[string]interface{}{req}, "id")
+			if err != nil {
+				return nil, errors.Trace(err)
 			}
-			esUpdateNum.WithLabelValues(rule.Index).Inc()
-		}
+			reqs = append(reqs, resp)
 
-		reqs = append(reqs, req)
+			meiliUpdateNum.WithLabelValues(rule.Index).Inc()
+		}
 	}
 
 	return reqs, nil
@@ -329,7 +316,7 @@ func (r *River) makeReqColumnData(col *schema.TableColumn, value interface{}) in
 	case schema.TYPE_DATETIME, schema.TYPE_TIMESTAMP:
 		switch v := value.(type) {
 		case string:
-			vt, err := time.ParseInLocation(mysql.TimeFormat, string(v), time.Local)
+			vt, err := time.ParseInLocation(mysql.TimeFormat, v, time.Local)
 			if err != nil || vt.IsZero() { // failed to parse date or zero date
 				return nil
 			}
@@ -338,7 +325,7 @@ func (r *River) makeReqColumnData(col *schema.TableColumn, value interface{}) in
 	case schema.TYPE_DATE:
 		switch v := value.(type) {
 		case string:
-			vt, err := time.Parse(mysqlDateFormat, string(v))
+			vt, err := time.Parse(mysqlDateFormat, v)
 			if err != nil || vt.IsZero() { // failed to parse date or zero date
 				return nil
 			}
@@ -352,48 +339,41 @@ func (r *River) makeReqColumnData(col *schema.TableColumn, value interface{}) in
 func (r *River) getFieldParts(k string, v string) (string, string, string) {
 	composedField := strings.Split(v, ",")
 
-	mysql := k
-	elastic := composedField[0]
+	mysqlCol := k
+	meiliCol := composedField[0]
 	fieldType := ""
 
-	if 0 == len(elastic) {
-		elastic = mysql
+	if 0 == len(meiliCol) {
+		meiliCol = mysqlCol
 	}
 	if 2 == len(composedField) {
 		fieldType = composedField[1]
 	}
 
-	return mysql, elastic, fieldType
+	return mysqlCol, meiliCol, fieldType
 }
 
-func (r *River) makeInsertReqData(req *elastic.BulkRequest, rule *Rule, values []interface{}) {
-	req.Data = make(map[string]interface{}, len(values))
-	req.Action = elastic.ActionIndex
-
+func (r *River) makeInsertReqData(req *map[string]interface{}, rule *Rule, values []interface{}) {
 	for i, c := range rule.TableInfo.Columns {
 		if !rule.CheckFilter(c.Name) {
 			continue
 		}
 		mapped := false
 		for k, v := range rule.FieldMapping {
-			mysql, elastic, fieldType := r.getFieldParts(k, v)
-			if mysql == c.Name {
+			mysqlColName, meiliColName, fieldType := r.getFieldParts(k, v)
+			if mysqlColName == c.Name {
 				mapped = true
-				req.Data[elastic] = r.getFieldValue(&c, fieldType, values[i])
+				(*req)[meiliColName] = r.getFieldValue(&c, fieldType, values[i])
 			}
 		}
 		if mapped == false {
-			req.Data[c.Name] = r.makeReqColumnData(&c, values[i])
+			(*req)[c.Name] = r.makeReqColumnData(&c, values[i])
 		}
 	}
 }
 
-func (r *River) makeUpdateReqData(req *elastic.BulkRequest, rule *Rule,
+func (r *River) makeUpdateReqData(req *map[string]interface{}, rule *Rule,
 	beforeValues []interface{}, afterValues []interface{}) {
-	req.Data = make(map[string]interface{}, len(beforeValues))
-
-	// maybe dangerous if something wrong delete before?
-	req.Action = elastic.ActionUpdate
 
 	for i, c := range rule.TableInfo.Columns {
 		mapped := false
@@ -405,16 +385,15 @@ func (r *River) makeUpdateReqData(req *elastic.BulkRequest, rule *Rule,
 			continue
 		}
 		for k, v := range rule.FieldMapping {
-			mysql, elastic, fieldType := r.getFieldParts(k, v)
-			if mysql == c.Name {
+			mysqlColName, meiliColName, fieldType := r.getFieldParts(k, v)
+			if mysqlColName == c.Name {
 				mapped = true
-				req.Data[elastic] = r.getFieldValue(&c, fieldType, afterValues[i])
+				(*req)[meiliColName] = r.getFieldValue(&c, fieldType, afterValues[i])
 			}
 		}
 		if mapped == false {
-			req.Data[c.Name] = r.makeReqColumnData(&c, afterValues[i])
+			(*req)[c.Name] = r.makeReqColumnData(&c, afterValues[i])
 		}
-
 	}
 }
 
@@ -456,38 +435,7 @@ func (r *River) getDocID(rule *Rule, row []interface{}) (string, error) {
 	return buf.String(), nil
 }
 
-func (r *River) getParentID(rule *Rule, row []interface{}, columnName string) (string, error) {
-	index := rule.TableInfo.FindColumn(columnName)
-	if index < 0 {
-		return "", errors.Errorf("parent id not found %s(%s)", rule.TableInfo.Name, columnName)
-	}
-
-	return fmt.Sprint(row[index]), nil
-}
-
-func (r *River) doBulk(reqs []*elastic.BulkRequest) error {
-	if len(reqs) == 0 {
-		return nil
-	}
-
-	if resp, err := r.es.Bulk(reqs); err != nil {
-		log.Errorf("sync docs err %v after binlog %s", err, r.canal.SyncedPosition())
-		return errors.Trace(err)
-	} else if resp.Code/100 == 2 || resp.Errors {
-		for i := 0; i < len(resp.Items); i++ {
-			for action, item := range resp.Items[i] {
-				if len(item.Error) > 0 {
-					log.Errorf("%s index: %s, type: %s, id: %s, status: %d, error: %s",
-						action, item.Index, item.Type, item.ID, item.Status, item.Error)
-				}
-			}
-		}
-	}
-
-	return nil
-}
-
-// get mysql field value and convert it to specific value to es
+// get mysql field value and convert it to specific value to meili
 func (r *River) getFieldValue(col *schema.TableColumn, fieldType string, value interface{}) interface{} {
 	var fieldValue interface{}
 	switch fieldType {
