@@ -4,6 +4,7 @@ go 1.20
 
 require (
 	github.com/BurntSushi/toml v1.3.1
+	github.com/avast/retry-go/v4 v4.3.4
 	github.com/go-mysql-org/go-mysql v1.7.0
 	github.com/juju/errors v1.0.0
 	github.com/meilisearch/meilisearch-go v0.25.0

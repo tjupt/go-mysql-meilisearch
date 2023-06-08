@@ -79,7 +79,7 @@ func (s *riverTestSuite) SetUpSuite(c *C) {
 	cfg.MyAddr = *myAddr
 	cfg.MyUser = "root"
 	cfg.MyPassword = ""
-	cfg.MyCharset = "utf8"
+	cfg.MyCharset = "utf8mb4"
 	cfg.MeiliAddr = *meiliAddr
 
 	cfg.ServerID = 1001
@@ -90,6 +90,9 @@ func (s *riverTestSuite) SetUpSuite(c *C) {
 
 	cfg.StatAddr = "127.0.0.1:12800"
 	cfg.StatPath = "/metrics1"
+
+	cfg.BulkSize = 1
+	cfg.FlushBulkTime = TomlDuration{3 * time.Millisecond}
 
 	os.RemoveAll(cfg.DataDir)
 

@@ -38,6 +38,10 @@ type Config struct {
 
 	Rules []*Rule `toml:"rule"`
 
+	BulkSize int `toml:"bulk_size"`
+
+	FlushBulkTime TomlDuration `toml:"flush_bulk_time"`
+
 	SkipNoPkTable bool `toml:"skip_no_pk_table"`
 }
 

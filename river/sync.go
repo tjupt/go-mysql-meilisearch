@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"github.com/avast/retry-go/v4"
 	"github.com/meilisearch/meilisearch-go"
+	"github.com/tjupt/go-mysql-meilisearch/meili"
 	"reflect"
 	"strings"
 	"time"
@@ -16,6 +18,8 @@ import (
 	"github.com/juju/errors"
 	"github.com/siddontang/go-log/log"
 )
+
+var meiliTaskFailed = errors.New("meilisearch task failed")
 
 const (
 	// fixme: 检查格式是否符合meilisearch要求
@@ -71,7 +75,7 @@ func (h *eventHandler) OnRow(e *canal.RowsEvent) error {
 		return nil
 	}
 
-	var reqs []*meilisearch.TaskInfo
+	var reqs []*meili.Request
 	var err error
 	switch e.Action {
 	case canal.InsertAction:
@@ -107,13 +111,27 @@ func (h *eventHandler) String() string {
 }
 
 func (r *River) syncLoop() {
+	bulkSize := r.c.BulkSize
+	if bulkSize == 0 {
+		bulkSize = 128
+	}
+
+	interval := r.c.FlushBulkTime.Duration
+	if interval == 0 {
+		interval = 200 * time.Millisecond
+	}
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
 	defer r.wg.Done()
 
 	lastSavedTime := time.Now()
+	reqs := make([]*meili.Request, 0, 1024)
 
 	var pos mysql.Position
 
 	for {
+		needFlush := false
 		needSavePos := false
 
 		select {
@@ -123,22 +141,51 @@ func (r *River) syncLoop() {
 				now := time.Now()
 				if v.force || now.Sub(lastSavedTime) > 3*time.Second {
 					lastSavedTime = now
+					needFlush = true
 					needSavePos = true
 					pos = v.pos
 				}
-			case []*meilisearch.TaskInfo:
-				for _, req := range v {
-					task, err := r.client.WaitForTask(req.TaskUID)
-					if err != nil {
-						// todo: 重试？
-						log.Errorf("meilisearch task failed: %v", err)
-					} else {
-						log.Debugf("meilisearch task success: %v", task.Type)
-					}
-				}
+			case []*meili.Request:
+				reqs = append(reqs, v...)
+				needFlush = len(reqs) >= bulkSize
 			}
+		case <-ticker.C:
+			needFlush = true
 		case <-r.ctx.Done():
 			return
+		}
+
+		if needFlush && len(reqs) > 0 {
+			tasks, errs := r.doRequest(reqs)
+			if len(errs) > 0 {
+				for _, err := range errs {
+					log.Errorf("do meilisearch request err %v, close sync", err)
+				}
+				r.cancel()
+				return
+			}
+
+			for _, task := range tasks {
+				err := retry.Do(func() error {
+					task, err := r.client.WaitForTask(task.TaskInfo.TaskUID)
+					if err != nil {
+						return err
+					}
+					if task.Status == meilisearch.TaskStatusFailed {
+						log.Errorf("meilisearch task failed: %v", task.Error)
+						return meiliTaskFailed
+					}
+
+					return nil
+				}, retry.Attempts(10), retry.AttemptsForError(1, meiliTaskFailed))
+
+				if err != nil {
+					// 重新投递
+					log.Warnf("requests resend due to err: %v", err)
+					r.syncCh <- task.Requests
+				}
+			}
+			reqs = reqs[0:0]
 		}
 
 		if needSavePos {
@@ -177,18 +224,16 @@ func (r *River) makeRequest(rule *Rule, action string, rows [][]interface{}) ([]
 	return reqs, nil
 }
 
-func (r *River) makeInsertRequest(rule *Rule, rows [][]interface{}) ([]*meilisearch.TaskInfo, error) {
+func (r *River) makeInsertRequest(rule *Rule, rows [][]interface{}) ([]*meili.Request, error) {
 	reqs, err := r.makeRequest(rule, canal.InsertAction, rows)
 	if err != nil {
 		return nil, err
 	}
 
-	resp, err := r.client.Index(rule.Index).AddDocuments(reqs, "id")
-
-	return []*meilisearch.TaskInfo{resp}, err
+	return []*meili.Request{{Type: canal.InsertAction, Index: rule.Index, Data: reqs}}, nil
 }
 
-func (r *River) makeDeleteRequest(rule *Rule, rows [][]interface{}) ([]*meilisearch.TaskInfo, error) {
+func (r *River) makeDeleteRequest(rule *Rule, rows [][]interface{}) ([]*meili.Request, error) {
 	ids := make([]string, 0, len(rows))
 
 	for _, values := range rows {
@@ -199,17 +244,15 @@ func (r *River) makeDeleteRequest(rule *Rule, rows [][]interface{}) ([]*meilisea
 		ids = append(ids, id)
 	}
 
-	resp, err := r.client.Index(rule.Index).DeleteDocuments(ids)
-
-	return []*meilisearch.TaskInfo{resp}, err
+	return []*meili.Request{{Type: canal.DeleteAction, Index: rule.Index, Data: ids}}, nil
 }
 
-func (r *River) makeUpdateRequest(rule *Rule, rows [][]interface{}) ([]*meilisearch.TaskInfo, error) {
+func (r *River) makeUpdateRequest(rule *Rule, rows [][]interface{}) ([]*meili.Request, error) {
 	if len(rows)%2 != 0 {
 		return nil, errors.Errorf("invalid update rows event, must have 2x rows, but %d", len(rows))
 	}
 
-	reqs := make([]*meilisearch.TaskInfo, 0, len(rows))
+	reqs := make([]*meili.Request, 0, len(rows))
 
 	for i := 0; i < len(rows); i += 2 {
 		beforeID, err := r.getDocID(rule, rows[i])
@@ -227,28 +270,19 @@ func (r *River) makeUpdateRequest(rule *Rule, rows [][]interface{}) ([]*meilisea
 		req["id"] = afterID
 
 		if beforeID != afterID {
-			resp, err := r.client.Index(rule.Index).DeleteDocument(beforeID)
-			if err != nil {
-				return nil, errors.Trace(err)
-			}
-			reqs = append(reqs, resp)
+			reqs = append(reqs, &meili.Request{Type: canal.DeleteAction, Index: rule.Index, Data: []string{beforeID}})
 
 			r.makeInsertReqData(&req, rule, rows[i+1])
-			resp, err = r.client.Index(rule.Index).AddDocuments([]map[string]interface{}{req}, "id")
 			if err != nil {
 				return nil, errors.Trace(err)
 			}
-			reqs = append(reqs, resp)
+			reqs = append(reqs, &meili.Request{Type: canal.InsertAction, Index: rule.Index, Data: []*map[string]interface{}{&req}})
 
 			meiliDeleteNum.WithLabelValues(rule.Index).Inc()
 			meiliInsertNum.WithLabelValues(rule.Index).Inc()
 		} else {
 			r.makeUpdateReqData(&req, rule, rows[i], rows[i+1])
-			resp, err := r.client.Index(rule.Index).UpdateDocuments([]map[string]interface{}{req}, "id")
-			if err != nil {
-				return nil, errors.Trace(err)
-			}
-			reqs = append(reqs, resp)
+			reqs = append(reqs, &meili.Request{Type: canal.UpdateAction, Index: rule.Index, Data: []*map[string]interface{}{&req}})
 
 			meiliUpdateNum.WithLabelValues(rule.Index).Inc()
 		}
@@ -463,4 +497,80 @@ func (r *River) getFieldValue(col *schema.TableColumn, fieldType string, value i
 		fieldValue = r.makeReqColumnData(col, value)
 	}
 	return fieldValue
+}
+
+func (r *River) doRequest(reqs []*meili.Request) ([]*meili.Response, []error) {
+	var errs []error
+	var resps []*meili.Response
+
+	var dataUpsert []*map[string]interface{}
+	var dataDelete []string
+	var inBatchReqs []*meili.Request
+	curAction := ""
+	curIndex := ""
+	for _, req := range reqs {
+		if curAction == "" {
+			curAction = req.Type
+			curIndex = req.Index
+		}
+		if curAction != req.Type || curIndex != req.Index {
+			// 当当前请求与前序请求的类型或index有一个不一致，则将当前batch提交，开启新的batch
+			switch curAction {
+			case canal.InsertAction:
+				if resp, err := r.client.Index(curIndex).AddDocuments(dataUpsert, "id"); err != nil {
+					errs = append(errs, err)
+				} else {
+					resps = append(resps, &meili.Response{TaskInfo: resp, Requests: inBatchReqs})
+				}
+			case canal.UpdateAction:
+				if resp, err := r.client.Index(curIndex).UpdateDocuments(dataUpsert, "id"); err != nil {
+					errs = append(errs, err)
+				} else {
+					resps = append(resps, &meili.Response{TaskInfo: resp, Requests: inBatchReqs})
+				}
+			case canal.DeleteAction:
+				if resp, err := r.client.Index(curIndex).DeleteDocuments(dataDelete); err != nil {
+					errs = append(errs, err)
+				} else {
+					resps = append(resps, &meili.Response{TaskInfo: resp, Requests: inBatchReqs})
+				}
+			}
+
+			curAction = req.Type
+			curIndex = req.Index
+			dataUpsert = dataUpsert[0:0]
+			dataDelete = dataDelete[0:0]
+			inBatchReqs = inBatchReqs[0:0]
+		}
+
+		if curAction == canal.DeleteAction {
+			dataDelete = append(dataDelete, req.Data.([]string)...)
+		} else {
+			dataUpsert = append(dataUpsert, req.Data.([]*map[string]interface{})...)
+		}
+		inBatchReqs = append(inBatchReqs, req)
+	}
+
+	switch curAction {
+	case canal.InsertAction:
+		if resp, err := r.client.Index(curIndex).AddDocuments(dataUpsert, "id"); err != nil {
+			errs = append(errs, err)
+		} else {
+			resps = append(resps, &meili.Response{TaskInfo: resp, Requests: inBatchReqs})
+		}
+	case canal.UpdateAction:
+		if resp, err := r.client.Index(curIndex).UpdateDocuments(dataUpsert, "id"); err != nil {
+			errs = append(errs, err)
+		} else {
+			resps = append(resps, &meili.Response{TaskInfo: resp, Requests: inBatchReqs})
+		}
+	case canal.DeleteAction:
+		if resp, err := r.client.Index(curIndex).DeleteDocuments(dataDelete); err != nil {
+			errs = append(errs, err)
+		} else {
+			resps = append(resps, &meili.Response{TaskInfo: resp, Requests: inBatchReqs})
+		}
+	}
+
+	return resps, errs
 }
