@@ -351,7 +351,9 @@ func (r *River) makeReqColumnData(col *schema.TableColumn, value interface{}) in
 			if err != nil || vt.IsZero() { // failed to parse date or zero date
 				return nil
 			}
-			return vt.Format(time.RFC3339)
+			// return vt.Format(time.RFC3339)
+			// see: https://www.meilisearch.com/docs/learn/advanced/working_with_dates
+			return vt.Unix()
 		}
 	case schema.TYPE_DATE:
 		switch v := value.(type) {
@@ -360,7 +362,9 @@ func (r *River) makeReqColumnData(col *schema.TableColumn, value interface{}) in
 			if err != nil || vt.IsZero() { // failed to parse date or zero date
 				return nil
 			}
-			return vt.Format(mysqlDateFormat)
+			// return vt.Format(mysqlDateFormat)
+			// see: https://www.meilisearch.com/docs/learn/advanced/working_with_dates
+			return vt.Unix()
 		}
 	}
 

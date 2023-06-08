@@ -336,9 +336,9 @@ func (s *riverTestSuite) TestRiver(c *C) {
 
 	r = s.testMeiliGet(c, "16")
 	c.Assert(r.Found, IsTrue)
-	tdt, _ := time.Parse(time.RFC3339, r.Source["tdatetime"].(string))
+	tdt := time.Unix(int64(r.Source["tdatetime"].(float64)), 0)
 	c.Assert(tdt.Format(mysql.TimeFormat), Equals, dateTimeStr)
-	c.Assert(r.Source["tdate"], Equals, dateStr)
+	c.Assert(time.Unix(int64(r.Source["tdate"].(float64)), 0).Format(mysqlDateFormat), Equals, dateStr)
 
 	r = s.testMeiliGet(c, "20")
 	c.Assert(r.Found, IsTrue)
