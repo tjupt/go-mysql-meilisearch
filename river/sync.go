@@ -24,9 +24,6 @@ var meiliTaskFailed = errors.New("meilisearch task failed")
 const (
 	// fixme: 检查格式是否符合meilisearch要求
 	fieldTypeList = "list"
-	// for the mysql int type to meili date type
-	// set the [rule.field] created_time = ",date"
-	fieldTypeDate = "date"
 )
 
 const mysqlDateFormat = "2006-01-02"
@@ -479,17 +476,6 @@ func (r *River) getFieldValue(col *schema.TableColumn, fieldType string, value i
 			fieldValue = strings.Split(str, ",")
 		} else {
 			fieldValue = v
-		}
-
-	case fieldTypeDate:
-		if col.Type == schema.TYPE_NUMBER {
-			col.Type = schema.TYPE_DATETIME
-
-			v := reflect.ValueOf(value)
-			switch v.Kind() {
-			case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-				fieldValue = r.makeReqColumnData(col, time.Unix(v.Int(), 0).Format(mysql.TimeFormat))
-			}
 		}
 	}
 
