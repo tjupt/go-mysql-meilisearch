@@ -22,8 +22,9 @@ import (
 var meiliTaskFailed = errors.New("meilisearch task failed")
 
 const (
-	// fixme: 检查格式是否符合meilisearch要求
-	fieldTypeList = "list"
+	fieldTypeList      = "list"
+	fieldTypeYesNoEnum = "yesnoenum"
+	fieldTypeBool      = "bool"
 )
 
 const mysqlDateFormat = "2006-01-02"
@@ -480,6 +481,21 @@ func (r *River) getFieldValue(col *schema.TableColumn, fieldType string, value i
 			fieldValue = strings.Split(str, ",")
 		} else {
 			fieldValue = v
+		}
+	case fieldTypeYesNoEnum:
+		v := r.makeReqColumnData(col, value)
+		if str, ok := v.(string); ok {
+			fieldValue = str == "yes"
+		} else {
+			fieldValue = v
+		}
+	case fieldTypeBool:
+		if col.Type == schema.TYPE_NUMBER || col.Type == schema.TYPE_MEDIUM_INT {
+			v := reflect.ValueOf(value)
+			switch v.Kind() {
+			case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+				fieldValue = v.Int() != 0
+			}
 		}
 	}
 
