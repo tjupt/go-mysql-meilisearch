@@ -23,8 +23,9 @@ var meiliTaskFailed = errors.New("meilisearch task failed")
 
 const (
 	fieldTypeList      = "list"
-	fieldTypeYesNoEnum = "yesnoenum"
+	fieldTypeYesNoBool = "yes_no_bool"
 	fieldTypeBool      = "bool"
+	fieldTypeIntEnum   = "int_enum"
 )
 
 const mysqlDateFormat = "2006-01-02"
@@ -482,7 +483,7 @@ func (r *River) getFieldValue(col *schema.TableColumn, fieldType string, value i
 		} else {
 			fieldValue = v
 		}
-	case fieldTypeYesNoEnum:
+	case fieldTypeYesNoBool:
 		v := r.makeReqColumnData(col, value)
 		if str, ok := v.(string); ok {
 			fieldValue = str == "yes"
@@ -497,12 +498,24 @@ func (r *River) getFieldValue(col *schema.TableColumn, fieldType string, value i
 				fieldValue = v.Int() != 0
 			}
 		}
+	case fieldTypeIntEnum:
+		v := r.makeReqColumnData(col, value)
+		fieldValue = r.makeIntEnumColumnData(col, v)
 	}
 
 	if fieldValue == nil {
 		fieldValue = r.makeReqColumnData(col, value)
 	}
 	return fieldValue
+}
+
+func (r *River) makeIntEnumColumnData(col *schema.TableColumn, value interface{}) int {
+	for i, v := range col.EnumValues {
+		if v == value {
+			return i
+		}
+	}
+	return -1
 }
 
 func (r *River) doRequest(reqs []*meili.Request) ([]*meili.Response, []error) {
