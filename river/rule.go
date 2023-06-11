@@ -1,6 +1,7 @@
 package river
 
 import (
+	"github.com/meilisearch/meilisearch-go"
 	"strings"
 
 	"github.com/go-mysql-org/go-mysql/schema"
@@ -26,6 +27,8 @@ type Rule struct {
 
 	//only MySQL fields in filter will be synced , default sync all fields
 	Filter []string `toml:"filter"`
+
+	IndexSettings *meilisearch.Settings `toml:"meili"`
 }
 
 func newDefaultRule(schema string, table string) *Rule {

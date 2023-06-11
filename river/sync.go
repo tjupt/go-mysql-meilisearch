@@ -129,6 +129,7 @@ func (r *River) syncLoop() {
 
 	var pos mysql.Position
 
+	needUpdateIndexSettings := true
 	for {
 		needFlush := false
 		needSavePos := false
@@ -194,11 +195,43 @@ func (r *River) syncLoop() {
 				return
 			}
 		}
+
+		if needUpdateIndexSettings {
+			updateFailed := false
+			for _, rule := range r.rules {
+				if rule.IndexSettings != nil {
+					err := retry.Do(func() error {
+						resp, err := r.client.Index(rule.Index).UpdateSettings(rule.IndexSettings)
+						if err != nil {
+							log.Errorf("update meilisearch settings for index %s failed: %v", rule.Index, err)
+							return errors.New("meilisearch update settings failed")
+						}
+						task, err := r.client.WaitForTask(resp.TaskUID)
+						if err != nil {
+							return err
+						}
+						if task.Status == meilisearch.TaskStatusFailed {
+							log.Errorf("meilisearch task failed: %v", task.Error)
+							return meiliTaskFailed
+						} else {
+							log.Infof("update meilisearch index settings success: %s", rule.Index)
+						}
+
+						return nil
+					}, retry.Attempts(10), retry.AttemptsForError(1, meiliTaskFailed))
+
+					if err != nil {
+						updateFailed = true
+					}
+				}
+			}
+
+			needUpdateIndexSettings = updateFailed
+		}
 	}
 }
 
-// for insert and delete
-func (r *River) makeRequest(rule *Rule, action string, rows [][]interface{}) ([]*map[string]interface{}, error) {
+func (r *River) makeInsertRequest(rule *Rule, rows [][]interface{}) ([]*meili.Request, error) {
 	reqs := make([]*map[string]interface{}, 0, len(rows))
 
 	for _, values := range rows {
@@ -210,23 +243,9 @@ func (r *River) makeRequest(rule *Rule, action string, rows [][]interface{}) ([]
 		req := make(map[string]interface{})
 		req["id"] = id
 
-		if action == canal.DeleteAction {
-			meiliDeleteNum.WithLabelValues(rule.Index).Inc()
-		} else {
-			r.makeInsertReqData(&req, rule, values)
-			meiliInsertNum.WithLabelValues(rule.Index).Inc()
-		}
-
+		r.makeInsertReqData(&req, rule, values)
+		meiliInsertNum.WithLabelValues(rule.Index).Inc()
 		reqs = append(reqs, &req)
-	}
-
-	return reqs, nil
-}
-
-func (r *River) makeInsertRequest(rule *Rule, rows [][]interface{}) ([]*meili.Request, error) {
-	reqs, err := r.makeRequest(rule, canal.InsertAction, rows)
-	if err != nil {
-		return nil, err
 	}
 
 	return []*meili.Request{{Type: canal.InsertAction, Index: rule.Index, Data: reqs}}, nil
@@ -241,6 +260,7 @@ func (r *River) makeDeleteRequest(rule *Rule, rows [][]interface{}) ([]*meili.Re
 			return nil, errors.Trace(err)
 		}
 		ids = append(ids, id)
+		meiliDeleteNum.WithLabelValues(rule.Index).Inc()
 	}
 
 	return []*meili.Request{{Type: canal.DeleteAction, Index: rule.Index, Data: ids}}, nil
