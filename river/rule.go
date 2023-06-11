@@ -15,7 +15,7 @@ type Rule struct {
 	Schema string   `toml:"schema"`
 	Table  string   `toml:"table"`
 	Index  string   `toml:"index"`
-	ID     []string `toml:"id"` // todo: support
+	ID     []string `toml:"id"`
 
 	// Default, a MySQL table field name is mapped to meilisearch field name.
 	// Sometimes, you want to use different name, e.g, the MySQL file name is title,

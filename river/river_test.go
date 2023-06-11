@@ -65,8 +65,10 @@ func (s *riverTestSuite) SetUpSuite(c *C) {
     `
 
 	s.testExecute(c, "DROP TABLE IF EXISTS test_river")
+	s.testExecute(c, "DROP TABLE IF EXISTS test_for_id")
 	s.testExecute(c, "DROP TABLE IF EXISTS test_for_json")
 	s.testExecute(c, fmt.Sprintf(schema, "test_river"))
+	s.testExecute(c, fmt.Sprintf(schema, "test_for_id"))
 	s.testExecute(c, fmt.Sprintf(schemaJSON, "test_for_json"))
 
 	for i := 0; i < 10; i++ {
@@ -96,7 +98,7 @@ func (s *riverTestSuite) SetUpSuite(c *C) {
 
 	os.RemoveAll(cfg.DataDir)
 
-	cfg.Sources = []SourceConfig{{Schema: "test", Tables: []string{"test_river", "test_river_[0-9]{4}", "test_for_json"}}}
+	cfg.Sources = []SourceConfig{{Schema: "test", Tables: []string{"test_river", "test_for_id", "test_river_[0-9]{4}", "test_for_json"}}}
 
 	cfg.Rules = []*Rule{
 		{
@@ -104,6 +106,14 @@ func (s *riverTestSuite) SetUpSuite(c *C) {
 			Table:        "test_river",
 			Index:        "river",
 			FieldMapping: map[string]string{"title": "meili_title", "mylist": "meili_mylist,list", "mydate": ",date"},
+		},
+
+		{
+			Schema:       "test",
+			Table:        "test_for_id",
+			Index:        "river",
+			ID:           []string{"id", "title"},
+			FieldMapping: map[string]string{"title": "es_title", "mylist": "es_mylist,list", "mydate": ",date"},
 		},
 
 		{
@@ -152,14 +162,23 @@ data_dir = "./var"
 [[source]]
 schema = "test"
 
-tables = ["test_river", "test_river_[0-9]{4}", "test_for_json"]
+tables = ["test_river", "test_for_id", "test_river_[0-9]{4}", "test_for_json"]
 
 [[rule]]
 schema = "test"
 table = "test_river"
 index = "river"
-type = "river"
-parent = "pid"
+
+    [rule.field]
+    title = "meili_title"
+    mylist = "meili_mylist,list"
+    mydate = ",date"
+
+[[rule]]
+schema = "test"
+table = "test_for_id"
+index = "river"
+id = ["id", "title"]
 
     [rule.field]
     title = "meili_title"
@@ -170,7 +189,6 @@ parent = "pid"
 schema = "test"
 table = "test_river_[0-9]{4}"
 index = "river"
-type = "river"
 
     [rule.field]
     title = "meili_title"
@@ -181,14 +199,13 @@ type = "river"
 schema = "test"
 table = "test_for_json"
 index = "river"
-type = "river"
 `
 
 	cfg, err := NewConfig(str)
 	c.Assert(err, IsNil)
 	c.Assert(cfg.Sources, HasLen, 1)
-	c.Assert(cfg.Sources[0].Tables, HasLen, 3)
-	c.Assert(cfg.Rules, HasLen, 3)
+	c.Assert(cfg.Sources[0].Tables, HasLen, 4)
+	c.Assert(cfg.Rules, HasLen, 4)
 }
 
 func (s *riverTestSuite) testExecute(c *C, query string, args ...interface{}) {
@@ -202,6 +219,7 @@ func (s *riverTestSuite) testPrepareData(c *C) {
 	s.testExecute(c, "INSERT INTO test_river (id, title, content, tenum, tset) VALUES (?, ?, ?, ?, ?)", 2, "second", "hello mysql 2", "e2", "b,c")
 	s.testExecute(c, "INSERT INTO test_river (id, title, content, tenum, tset) VALUES (?, ?, ?, ?, ?)", 3, "third", "hello meilisearch 3", "e3", "c")
 	s.testExecute(c, "INSERT INTO test_river (id, title, content, tenum, tset, tbit) VALUES (?, ?, ?, ?, ?, ?)", 4, "fouth", "hello go-mysql-meilisearch 4", "e1", "a,b,c", 0)
+	s.testExecute(c, "INSERT INTO test_for_id (id, title, content, tenum, tset) VALUES (?, ?, ?, ?, ?)", 1, "first", "hello go 1", "e1", "a,b")
 	s.testExecute(c, "INSERT INTO test_for_json (id, info) VALUES (?, ?)", 9200, "{\"first\": \"a\", \"second\": \"b\"}")
 
 	for i := 0; i < 10; i++ {
@@ -263,6 +281,9 @@ func (s *riverTestSuite) TestRiver(c *C) {
 	c.Assert(r.Found, IsTrue)
 	c.Assert(r.Source["tenum"], Equals, "e1")
 	c.Assert(r.Source["tset"], Equals, "a,b")
+
+	r = s.testMeiliGet(c, "1_first")
+	c.Assert(r.Found, IsTrue)
 
 	r = s.testMeiliGet(c, "9200")
 	c.Assert(r.Found, IsTrue)

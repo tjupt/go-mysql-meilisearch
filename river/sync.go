@@ -241,7 +241,7 @@ func (r *River) makeInsertRequest(rule *Rule, rows [][]interface{}) ([]*meili.Re
 		}
 
 		req := make(map[string]interface{})
-		req["id"] = id
+		req["_id"] = id
 
 		r.makeInsertReqData(&req, rule, values)
 		meiliInsertNum.WithLabelValues(rule.Index).Inc()
@@ -286,7 +286,7 @@ func (r *River) makeUpdateRequest(rule *Rule, rows [][]interface{}) ([]*meili.Re
 		}
 
 		req := make(map[string]interface{})
-		req["id"] = afterID
+		req["_id"] = afterID
 
 		if beforeID != afterID {
 			reqs = append(reqs, &meili.Request{Type: canal.DeleteAction, Index: rule.Index, Data: []string{beforeID}})
@@ -486,7 +486,7 @@ func (r *River) getDocID(rule *Rule, row []interface{}) (string, error) {
 		}
 
 		buf.WriteString(fmt.Sprintf("%s%v", sep, value))
-		sep = ":"
+		sep = "_"
 	}
 
 	return buf.String(), nil
@@ -556,13 +556,13 @@ func (r *River) doRequest(reqs []*meili.Request) ([]*meili.Response, []error) {
 			// 当当前请求与前序请求的类型或index有一个不一致，则将当前batch提交，开启新的batch
 			switch curAction {
 			case canal.InsertAction:
-				if resp, err := r.client.Index(curIndex).AddDocuments(dataUpsert, "id"); err != nil {
+				if resp, err := r.client.Index(curIndex).AddDocuments(dataUpsert, "_id"); err != nil {
 					errs = append(errs, err)
 				} else {
 					resps = append(resps, &meili.Response{TaskInfo: resp, Requests: inBatchReqs})
 				}
 			case canal.UpdateAction:
-				if resp, err := r.client.Index(curIndex).UpdateDocuments(dataUpsert, "id"); err != nil {
+				if resp, err := r.client.Index(curIndex).UpdateDocuments(dataUpsert, "_id"); err != nil {
 					errs = append(errs, err)
 				} else {
 					resps = append(resps, &meili.Response{TaskInfo: resp, Requests: inBatchReqs})
@@ -592,13 +592,13 @@ func (r *River) doRequest(reqs []*meili.Request) ([]*meili.Response, []error) {
 
 	switch curAction {
 	case canal.InsertAction:
-		if resp, err := r.client.Index(curIndex).AddDocuments(dataUpsert, "id"); err != nil {
+		if resp, err := r.client.Index(curIndex).AddDocuments(dataUpsert, "_id"); err != nil {
 			errs = append(errs, err)
 		} else {
 			resps = append(resps, &meili.Response{TaskInfo: resp, Requests: inBatchReqs})
 		}
 	case canal.UpdateAction:
-		if resp, err := r.client.Index(curIndex).UpdateDocuments(dataUpsert, "id"); err != nil {
+		if resp, err := r.client.Index(curIndex).UpdateDocuments(dataUpsert, "_id"); err != nil {
 			errs = append(errs, err)
 		} else {
 			resps = append(resps, &meili.Response{TaskInfo: resp, Requests: inBatchReqs})

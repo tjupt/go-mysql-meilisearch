@@ -136,6 +136,6 @@ filter = ["id", "name"]
 schema = "test"
 table = "tid_[0-9]{4}"
 index = "test"
-# The es doc's id will be `id`:`tag`
+# The es doc's id will be `id`_`tag`
 # It is useful for merge muliple table into one type while theses tables have same PK 
 id = ["id", "tag"]
