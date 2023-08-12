@@ -301,6 +301,12 @@ func (r *River) makeUpdateRequest(rule *Rule, rows [][]interface{}) ([]*meili.Re
 			meiliInsertNum.WithLabelValues(rule.Index).Inc()
 		} else {
 			r.makeUpdateReqData(&req, rule, rows[i], rows[i+1])
+
+			if len(req) <= 1 {
+				// 在没有任何更新的时候，不提交任务
+				continue
+			}
+
 			reqs = append(reqs, &meili.Request{Type: canal.UpdateAction, Index: rule.Index, Data: []*map[string]interface{}{&req}})
 
 			meiliUpdateNum.WithLabelValues(rule.Index).Inc()
