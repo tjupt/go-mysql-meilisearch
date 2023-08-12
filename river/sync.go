@@ -7,6 +7,7 @@ import (
 	"github.com/avast/retry-go/v4"
 	"github.com/meilisearch/meilisearch-go"
 	"github.com/tjupt/go-mysql-meilisearch/meili"
+	"os"
 	"reflect"
 	"strings"
 	"time"
@@ -166,22 +167,32 @@ func (r *River) syncLoop() {
 			}
 
 			for _, task := range tasks {
-				err := retry.Do(func() error {
-					task, err := r.client.WaitForTask(task.TaskInfo.TaskUID)
-					if err != nil {
-						return err
-					}
-					if task.Status == meilisearch.TaskStatusFailed {
-						log.Errorf("meilisearch task failed: %v", task.Error)
-						return meiliTaskFailed
-					}
+				err := retry.Do(
+					func() error {
+						task, err := r.client.WaitForTask(task.TaskInfo.TaskUID)
+						if err != nil {
+							return err
+						}
+						if task.Status == meilisearch.TaskStatusFailed {
+							log.Errorf("meilisearch task failed: %v", task.Error)
+							return meiliTaskFailed
+						}
 
-					return nil
-				}, retry.Attempts(10), retry.AttemptsForError(1, meiliTaskFailed))
+						return nil
+					},
+					retry.RetryIf(func(err error) bool {
+						return err != meiliTaskFailed
+					}),
+					retry.Attempts(0),
+				)
 
 				if err != nil {
 					// 重新投递
 					log.Warnf("requests resend due to err: %v", err)
+
+					// 记录错误请求的信息至磁盘
+					taskJson, _ := json.Marshal(task)
+					err = os.WriteFile(fmt.Sprintf("/tmp/task_%d.json", time.Now().Unix()), taskJson, 0644)
 					r.syncCh <- task.Requests
 				}
 			}
